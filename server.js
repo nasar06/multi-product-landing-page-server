@@ -1,35 +1,52 @@
-// server.js
+
+
+// 1. মডিউল এবং কনফিগারেশন লোড করা
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const dotenv = require('dotenv');
 
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+
 // Load environment variables from .env file
 dotenv.config();
 
-const app = express();
+// 2. অ্যাপ তৈরি এবং গ্লোবাল মিডলওয়্যার ব্যবহার করা
+const app = express(); 
+
+const User = require('./models/user'); // User মডেল ইমপোর্ট করা
+
 // Access PORT from .env file (defaults to 3000 if not set)
 const port = process.env.PORT || 3000;
 
-// Middlewares
-app.use(cors()); // Enable CORS to allow your front-end (HTML file) to talk to this server
-app.use(express.json()); // To parse incoming JSON data
 
-// 1. MongoDB Connection
-// Access MONGO_URI from .env file
+// মিডলওয়্যার
+app.use(express.json()); // To parse incoming JSON data from request body
+
+// CORS কনফিগারেশন
+app.use(cors({
+    origin: '*', 
+    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
+    credentials: true,
+}));
+
+
+// 3. MongoDB সংযোগ স্থাপন
 const uri = process.env.MONGO_URI;
 
-// Check if URI is present (Good practice)
 if (!uri) {
-    console.error('FATAL ERROR: MONGO_URI is not defined in .env file. Please check your .env file content.');
-    // process.exit(1); // Uncomment this line if you want the app to crash immediately without DB connection
+    console.error('FATAL ERROR: MONGO_URI is not defined in .env file.');
+    // process.exit(1);
 }
 
 mongoose.connect(uri)
     .then(() => console.log('MongoDB successfully connected'))
-    .catch(err => console.error('MongoDB connection error:', err.message)); // err.message shows cleaner error
+    .catch(err => console.error('MongoDB connection error:', err.message));
 
-// 2. Define the Schema (How your order data looks)
+
+// 4. Define the Schema (Order Model)
+// এখানে Order Model-টি সংজ্ঞায়িত করা হয়েছে, তাই আর require('../models/Order') দরকার নেই
 const orderSchema = new mongoose.Schema({
     billingDetails: {
         name: String,
@@ -44,9 +61,8 @@ const orderSchema = new mongoose.Schema({
         color: String,
         quantity: Number
     }],
-    // 👇 এই অংশটি ঠিক করতে হবে: এটি এখন একটি নেস্টেড অবজেক্ট
     shippingInfo: { 
-        type: { type: String }, // Mongoose এ type নামের ফিল্ড সংজ্ঞায়িত করতে inner type: String দিতে হয়।
+        type: { type: String }, 
         cost: String
     },
     summary: {
@@ -54,13 +70,11 @@ const orderSchema = new mongoose.Schema({
         total: String,
         paymentMethod: String
     },
-
-     status: {
+    status: {
         type: String,
-        enum: ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled'], // সম্ভাব্য স্ট্যাটাসগুলো
-        default: 'Pending' // ডিফল্ট স্ট্যাটাস হিসেবে Pending থাকবে
+        enum: ['Pending', 'Processing', 'Shipped', 'Delivered', 'Cancelled'],
+        default: 'Pending'
     },
-
     orderDate: {
         type: Date,
         default: Date.now
@@ -69,23 +83,24 @@ const orderSchema = new mongoose.Schema({
 
 const Order = mongoose.model('Order', orderSchema);
 
-// 3. Define the POST Route
+
+// ===============================================
+// 5. API রুট তৈরি করা
+// ===============================================
+
+// POST Route: নতুন অর্ডার তৈরি
 app.post('/api/orders', async (req, res) => {
     try {
         const orderData = req.body;
         
-        // Input validation (basic check)
         if (!orderData.billingDetails || orderData.orderedProducts.length === 0) {
             return res.status(400).json({ message: 'Invalid order data: Missing billing details or products.' });
         }
 
-        // Create a new Order document based on the data received from the front-end
         const newOrder = new Order(orderData);
-        
-        // Save the order to MongoDB
         await newOrder.save();
         
-        console.log('Order successfully saved to DB:', newOrder);
+        console.log('Order successfully saved to DB:', newOrder._id);
         res.status(201).json({ message: 'Order placed successfully!', orderId: newOrder._id });
     } catch (error) {
         console.error('Error saving order:', error);
@@ -93,19 +108,30 @@ app.post('/api/orders', async (req, res) => {
     }
 });
 
-// 4. GET Route: Fetch all orders
+
+// GET Route: সমস্ত অর্ডার আনা (ডেট ফিল্টার সহ)
 app.get('/api/orders/all', async (req, res) => {
     try {
-        // Find all orders and sort them by orderDate in descending order (-1)
-        const orders = await Order.find().sort({ orderDate: -1 });
+        const { startDate, endDate } = req.query; 
+        let filter = {};
 
-        // If no orders are found
-        if (orders.length === 0) {
-            return res.status(200).json({ message: 'No orders found yet.', orders: [] });
+        if (startDate || endDate) {
+            filter.orderDate = {};
+            
+            if (startDate) {
+                filter.orderDate.$gte = new Date(startDate); 
+            }
+            if (endDate) {
+                const endOfDay = new Date(endDate);
+                endOfDay.setDate(endOfDay.getDate() + 1); // পরের দিনের শুরুতে যেতে
+                filter.orderDate.$lt = endOfDay; 
+            }
         }
-
-        // Send the list of orders
-        res.status(200).json(orders);
+        
+        const orders = await Order.find(filter).sort({ orderDate: -1 });
+        
+        res.status(200).json(orders); 
+        
     } catch (error) {
         console.error('Error fetching orders:', error);
         res.status(500).json({ message: 'Failed to retrieve orders', error: error.message });
@@ -113,22 +139,52 @@ app.get('/api/orders/all', async (req, res) => {
 });
 
 
+// 🚨 PUT Route: সম্পূর্ণ অর্ডার এডিট ও আপডেটের জন্য 🚨
+// এই রুটটি 404 এরর ঠিক করবে।
+app.put('/api/orders/:id', async (req, res) => {
+    try {
+        const orderId = req.params.id; 
+        const updatedData = req.body;   
 
-// 5. PATCH Route: Update order status
+        const updatedOrder = await Order.findByIdAndUpdate(
+            orderId,
+            { $set: updatedData }, // ফ্রন্টএন্ড থেকে আসা সমস্ত ডেটা দিয়ে আপডেট করা
+            { 
+                new: true, 
+                runValidators: true
+            }
+        );
+
+        if (!updatedOrder) {
+            return res.status(404).json({ message: 'Order not found' });
+        }
+
+        res.status(200).json({ 
+            message: 'Order updated successfully', 
+            order: updatedOrder 
+        });
+
+    } catch (error) {
+        console.error('Error updating order:', error);
+        res.status(500).json({ message: 'Internal server error during update', error: error.message });
+    }
+});
+
+
+// PATCH Route: স্ট্যাটাস আপডেট (সাধারণত এটা PUT রুটের অংশ হিসেবেই কাজ করবে, তবে আলাদা রাখতে পারেন)
 app.patch('/api/orders/:orderId/status', async (req, res) => {
     try {
         const orderId = req.params.orderId;
-        const { newStatus } = req.body; // ফ্রন্ট-এন্ড থেকে { "newStatus": "Shipped" } আসবে
+        const { newStatus } = req.body; 
 
         if (!newStatus) {
             return res.status(400).json({ message: 'New status is required.' });
         }
         
-        // Find the order by ID and update the status field
         const updatedOrder = await Order.findByIdAndUpdate(
             orderId,
             { status: newStatus },
-            { new: true, runValidators: true } // new: true returns the updated document
+            { new: true, runValidators: true }
         );
 
         if (!updatedOrder) {
@@ -146,12 +202,11 @@ app.patch('/api/orders/:orderId/status', async (req, res) => {
 });
 
 
-// 6. DELETE Route: Delete an order
+// DELETE Route: অর্ডার ডিলিট
 app.delete('/api/orders/:orderId', async (req, res) => {
     try {
         const orderId = req.params.orderId;
         
-        // Find and delete the order by ID
         const deletedOrder = await Order.findByIdAndDelete(orderId);
 
         if (!deletedOrder) {
@@ -166,9 +221,75 @@ app.delete('/api/orders/:orderId', async (req, res) => {
 });
 
 
-// Start the server
+
+
+// server.js (লগইন রুট)
+
+app.post('/api/auth/login', async (req, res) => {
+    try {
+        const { email, password } = req.body;
+        // ... validation checks ...
+
+        const user = await User.findOne({ email }).select('+password');
+
+        if (!user || !(await user.comparePassword(password))) {
+            return res.status(401).json({ message: 'Invalid credentials.' });
+        }
+
+        // 🚨 টোকেনে 'role' ডেটা যুক্ত করা 🚨
+        const token = jwt.sign(
+            { id: user._id, role: user.role }, // <-- role এখানে যুক্ত করা হলো
+            process.env.JWT_SECRET || 'YOUR_SECRET_KEY', 
+            { expiresIn: '1d' }
+        );
+
+        // 4. টোকেন সহ রেসপন্স পাঠানো
+        res.status(200).json({ 
+            status: 'success', 
+            token, 
+            user: { id: user._id, email: user.email, name: user.name, role: user.role } // রোলটি সরাসরিও পাঠানো যেতে পারে
+        });
+
+    } catch (error) {
+        // ... error handling
+    }
+});
+
+
+// server.js (রেজিস্ট্রেশন রুট)
+
+app.post('/api/auth/register', async (req, res) => {
+    try {
+        const { name, email, password } = req.body; 
+        
+        if (!name || !email || !password) {
+             return res.status(400).json({ message: 'Name, Email, and password are required.' });
+        }
+        
+        // 🚨 ইউজার তৈরি করার সময় 'role' ফিল্ডটি omit করা হয়েছে, যাতে এটি ডিফল্ট 'user' হয়। 🚨
+        const newUser = await User.create({ name, email, password }); 
+        
+        // Response এ Role দেখানো
+        res.status(201).json({ 
+            message: 'User registered successfully! Now you can login.', 
+            user: newUser.email, 
+            name: newUser.name,
+            role: newUser.role // 'user' রোলটি পাঠানো হবে
+        });
+    } catch (error) {
+        // ... error handling
+    }
+});
+
+
+
+
+
+
+
+
+
+// 6. সার্ভার স্টার্ট করা
 app.listen(port, () => {
     console.log(`Server is running at http://localhost:${port}`);
-    // You can also display the JWT secret for confirmation (optional, for development only)
-    // console.log(`JWT_SECRET is: ${process.env.JWT_SECRET}`); 
 });
